@@ -1,0 +1,634 @@
+---
+title: "The practical introduction to Bayesian statistics that actually made sense to me"
+author: "Ryan S. Ritter"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    theme: cosmo
+    highlight: textmate
+    number_sections: false
+    code_folding: show
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r message=FALSE, warning=FALSE}
+### load libraries
+library(tidyverse)
+library(tidybayes)
+library(rstan)
+library(skimr)
+```
+
+# Background
+
+In grad school I was trained in frequentist statistics - which is great. Frequentist statistics are very useful. I'm not a hater*.
+
+\**Side note: I absolutely am a hater of the dichotomous decision making imposed by null hypothesis significance testing (NHST) and "statistical significance" (see [this great paper](https://www.nature.com/articles/d41586-019-00857-9)).*
+
+For many years, however -- given my lack of any formal training in Bayesian methods -- whenever I encountered Bayesian statistics I had a hard time getting it.
+
+When I started learning Bayesian statistics on my own, the best book I came across (by far) was Richard McElreath's [Statistical Rethinking](https://github.com/rmcelreath/rethinking). Using very simple examples and applications in R code, he walks through the basics in a way that just made things click for me. 
+
+The purpose of this notebook is to provide a similar practical introduction to the basics of Bayesian statistics in R -- using the same examples as in Statistical Rethinking -- but without relying on McElreath's `rethinking` R package. While `rethinking` is awesome, I personally prefer working more directly with `rstan` and using tidyverse friendly packages like `tidybayes`.
+
+Thanks to Richard McElreath for the great book, and I hope this helps others understand the basics of Bayesian statistics in the same way it did for me when I was first learning.
+
+## Why Bayesian?
+
+For me -- and I think for most people -- the most appealing thing about Bayesian statistics is that they allow for more intuitive statements to be made about the world. Frequentist stats can be hard to explain.
+
+For example, in frequentist statistics we're stuck in a world where we have to talk about  $p(data|hypothesis)$ -- the probability of the data given the hypothesis. This paints us into an (often misinterpreted) corner when it comes to things like p-values and confidence intervals. For example: 
+
+* **p-values:** The probability of observing this difference -- or a greater difference -- between two groups assuming the null hypothesis is true (i.e., we can't make a more intuitive statement about the probability of a given hypothesis being true).
+* **95% confidence intervals:** If we were to repeat our experiment many times, we'd expect our confidence interval to contain the true population difference between the two groups 95% of the time... as for our specific confidence interval, we just kinda hope it's one of the 95% of CI's that does contain the true population difference but we're not sure (i.e., we can't make a more intuitive statement about there being a 95% chance that the true difference between groups is somewhere between [lower 95% CI] and [upper 95% CI]).
+
+Bayesian statistics, on the other hand, flips this on its head. We get to talk about  $p(hypothesis|data)$ -- **the probability of the hypothesis given the data**
+
+* **Posterior:** Bayesian statistics result in a posterior distribution representing the relative plausibilities of different parameter values of interest, conditional on the data (i.e., we can say directly how likely it is that a given hypothesis about a parameter value is true).
+
+* **Credibility Intervals:** Given the posterior distribution of a parameter value of interest, we know the probability that it falls within any given interval (i.e., we can say directly that there's a 95% chance that the parameter value of interest lies somewhere between [lower 95% CI] and [upper 95% CI]).
+
+The rest of this notebook walks through the concepts of parameters/likelihood/priors and how to create posterior distributions from them -- first using an intuitive method known as grid approximation and then building on that intuition to understand sampling methods like Markov Chain Monte Carlo (MCMC).
+
+# A simple motivating example
+
+Let's start with a simple example where there is only 1 unknown parameter value of interest: the proportion of the Earth that is covered in water.
+
+Suppose we have a globe representing the Earth. We are curious how much of the surface of this globe is covered in water, so we adopt the following strategy: toss the globe in the air and catch it, then record whether the area under index finger is water (W) or land (L). The first 9 samples look like this:
+
+**W L W W W L W L W (i.e., 6 out of 9 samples are water)**
+
+What Bayesian statistics are going to allow us to do is calculate the posterior plausibility of different values of our unknown parameter of interest (i.e., the percent of the Earth that is covered in water), given this data we've collected along with any prior beliefs we might have about how much of the Earth is covered in water.
+
+To accomplish this we'll need a few things:
+
+* A likelihood function
+* The unknown parameter(s) we want to estimate
+* A prior distribution for each unknown parameter(s) we want to estimate
+
+## Likelihood
+
+Likelihood is a mathematical formula that specifies the plausibility of
+the data. It maps each possible parameter value onto the relative number
+of ways the data could occur, given that possibility.
+
+In our globe tossing example, we need to say how likely that exact
+sample is, out of the universe of potential samples of the same length.
+In this case we can use the **binomial distribution**. For example, the
+relative number of ways to get six W's, holding *p* at 0.50 and *n* at 9
+is:
+
+```{r}
+dbinom(6, size = 9, prob = 0.5)
+```
+
+But what is the most likely value of `prob` $p$, given our data and any prior beliefs? This is what we will soon find out.
+
+## Parameters
+
+Parameters are simply quantities that we wish to estimate from the data.
+They represent the different conjectures for the causes/explanations of
+the data.
+
+In globe tossing example, both *n* (number of tosses) and *w* (count of
+water) are data, leaving *p* as the unknown parameter that we wish to
+estimate (the proportion of Earth that is covered in water).
+
+## Prior
+
+For every parameter we intend our Bayesian model to estimate, we must
+provide a prior -- an initial plausibility assignment for each possible
+value of the parameter. More on priors below.
+
+## Posterior Distribution
+
+Once we have the likelihood, which parameters are to be estimated, and a
+prior for each parameter, we can calculate the **posterior** -- the
+relative plausibility of different parameter values, conditional on the
+data:
+
+$$Posterior = \frac{Likelihood\;\times\;Prior}{Average\;Likelihood}\\$$
+
+*Note: "Average likelihood" (sometimes also called "evidence" or "probability of the data") simply standardizes the posterior to ensure it sums (integrates) to 1.*
+
+However, knowing the math of Bayes theorem is often of little help because many models cannot be conditioned formally. Instead we use various numerical techniques to approximate the mathematics that follows from the definition of Bayes' theorem. We'll cover two such numerical techniques for computing posterior distributions here:
+
+* Grid approximation
+* Markov Chain Monte Carlo (MCMC)
+
+*Note: McElreath also nicely covers another approach -- Quadratic approximation -- in his book. Here I use grid approximation to build intuition and then jump straight to MCMC sampling which is commonly used when there's many (many) unknown parameters to estimate instead of just one*
+
+### Grid approximation
+
+While most parameters are continuous, capable of taking on infinite
+values, we can achieve excellent approximation of a continuous posterior
+distribution by considering only a finite "grid" of parameter values.
+
+First we can define the number of approximations to use. The more we use, the more granular our posterior distribution will be.
+
+```{r}
+# define the number of approximations to use
+n_approx <- 1000
+```
+
+Next we can define the "grid" of possible values of our unknown parameter that we wish to explore. In this case, we're interested in the plausibility of values ranging from 0 (0% of the Earth is covered in water) to 1 (100% of the Earth is covered in water).
+
+```{r}
+# define grid of 1000 possible values of p ranging from 0 to 1
+p_grid <- seq(from = 0, to = 1, length.out = n_approx)
+```
+
+Now, we might have some prior data or knowledge about how much of the Earth is covered in water, and we can specify a prior to reflect those beliefs. For example, we might use a "step prior" to indicate that we think the probability of the Earth being covered by any less than 50% water is zero. Here, though, we'll use a uniform prior to assign equal prior probability to all possible parameter values in our grid (even though this is not very reasonable: do we really think that 0% and 100% of Earth covered by water is just as likely as, say, 50%?):
+
+```{r}
+# define the prior
+prior <- rep(1, n_approx)  # uniform prior
+# prior <- ifelse(p_grid < 0.5, 0, 1)  # step prior, zero probability to values less than 0.5
+```
+
+Finally, we use the binomial distribution to calculate the likelihood of our data at each value in our "grid" which ranges from 0 to 1:
+
+```{r}
+# compute the likelihood at each value in the grid
+likelihood <- dbinom(6, size = 9, prob = p_grid)
+```
+
+And then we can compute our posterior using the formula above:
+
+```{r}
+# compute the product of likelihood and prior
+unstd_posterior <- likelihood * prior
+
+# standardize the posterior, so it sums to 1
+posterior <- unstd_posterior / sum(unstd_posterior)
+
+# plot the posterior distribution
+tibble(p_grid, posterior) %>%
+    ggplot(aes(x = p_grid, y = posterior)) +
+    geom_point(color = "sky blue") +
+    labs(
+        title = "Posterior distribution",
+        x = "Possible parameter values",
+        y = ""
+    ) +
+    theme_minimal()
+```
+
+Given that our posterior distribution sums to 1 and the density under this curve represents the plausibility of each possible parameter value (i.e., the proportion of Earth covered in water), we can proceed to ask very useful and intuitive questions. For example, we might ask what is the probability -- given the data we've collected -- that the proportion of Earth covered in water is less than 50% (by simply summing up the density for values of p_grid < .5)? Turns out, not very high (~17%):
+
+```{r}
+tibble(p_grid, posterior) %>%
+    mutate(
+        is_less_than_50 = if_else(p_grid < .5, 1, 0)
+    ) %>%
+    group_by(is_less_than_50) %>%
+    summarise(
+        prob = sum(posterior)
+    )
+```
+
+Now, to build our intuition about what Markov Chain Monte Carlo (MCMC) sampling is doing -- which we'll get to next -- let's introduce the idea of taking **samples** from our posterior distribution. 
+
+*Note: This will come in very handy because it allows us to avoid integral calculus... We can make inferences by simply summarizing samples from the posterior*
+
+To do this -- let's say we want to draw 10k samples from our posterior distribution -- all we need to do is sample from our grid of parameter values proportional to the posterior plausibility of each value:
+
+```{r}
+# draw samples
+samples <- sample(p_grid, prob = posterior, size = 10000, replace = TRUE)
+
+# plot the distribution
+tibble(samples) %>%
+    ggplot(aes(x = samples)) +
+    geom_histogram(fill = "sky blue", color = "white", bins = 50) +
+    labs(
+        title = "10k samples of the posterior distribution",
+        x = "Possible parameter values",
+        y = ""
+    ) +
+    theme_minimal()
+```
+
+We can now summarize these samples however we want (e.g., mean, median, mode, 95% CI, 89% CI, whatever), and the interpretation is very straightforward and intuitive. For example, we can now interpret 95% CI's (usually called credibility intervals in Bayesian stats) as the actual probability that the % of Earth covered in water is between the upper and lower limits:
+
+```{r}
+mean(samples)
+median(samples)
+
+# get the quantile intervals
+samples %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = qi
+    )
+
+# get highest density intervals (HDI) - the narrowest interval containing the specified probability mass
+# this actually captures the most probable values
+samples %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = hdi
+    )
+```
+*Note: In most cases the quantile (percentile) interval and highest density interval (HDI) should be very similar. If the choice of interval type makes a big difference then we shouldn't be using intervals to summarize the posterior. Remember, the entire posterior distribution -- not any single point within it -- is the Bayesian estimate.*
+
+And similar to what we did directly with the grid approximate posterior distribution, we can calculate the probability of our parameter value of interest being less than 50% using our **samples** from the posterior distribution (and sure enough we get a nearly identical result as above):
+
+```{r}
+tibble(samples) %>%
+    mutate(is_less_than_50 = if_else(samples < .5, 1, 0)) %>%
+    count(is_less_than_50) %>%
+    mutate(
+        total = sum(n),
+        prob = n / total
+    )
+```
+
+### Markov Chain Monte Carlo (MCMC)
+
+Now we get to the fun stuff. 
+
+With many unknown parameters that we want to estimate (e.g., hundreds, thousands in multi-level models), neither grid approximation nor quadratic approximation is satisfactory. Instead of attempting to compute or approximate the posterior distribution directly, MCMC draw samples from the posterior (just like we did above from our grid approximate posterior distribution). We end up with a collection of sampled parameter values, and the frequencies of these values correspond to their posterior plausibility.
+
+For now, though, let's stick with our simple example of estimating the proportion of Earth covered by water. Instead of using grid approximation to get our posterior, we'll use `rstan` and  Markov Chain Monte Carlo (MCMC) sampling.
+
+*Note: `rstan` is the R interface for stan - which is a more general C++ library for Bayesian inference. You can read much more about `rstan` [here](https://cran.r-project.org/web/packages/rstan/vignettes/rstan.html) and Stan [here](https://mc-stan.org/) as what we cover here only scratches the surface.* 
+
+#### A language for describing models
+
+Before we proceed any further, it's important to introduce the "language" we use to describe models. We need to be able to specify our likelihood function and priors for any unknown parameters we want to estimate.
+
+Recall that in our example we have collected some data (the number of times our thumb landed on water when we tossed the globe; we'll call this $w = 6$) of a specific sample size ($n = 9$). We also have one unknown parameter ($p$) we're interested in estimating, which is the proportion of Earth covered in water.
+
+We can describe this model as:
+
+$$w \sim Binomial(n, p)$$ 
+$$p \sim Uniform(0, 1)$$
+
+Read as:
+
+* The count of water tosses $w$ is distributed binomially with sample size $n$ and probability $p$.  
+* The prior for $p$ is assumed to be uniform between 0 and 1.
+
+The first defines the likelihood function, and the second defines the
+prior for the unknown part that we want to estimate.
+
+*Note: Arguably, one of the good things about rstan and Bayesian statistics is that they force us to be explicit about and have a solid understanding of the assumptions we're making about our models. We get to become more familiar with the probability distributions underlying our likelihood functions and priors.*
+
+#### Sampling from the posterior using MCMC
+
+Here we introduce the Stan model specification for our globe tossing example, implemented using the same "language" we just specified above.
+
+Specifically, Stan expects at least three blocks of information:
+
+* Data block: specifies the nature of the data that we have observed.
+* Parameters block: specifies the parameters whose posterior distribution is sought.
+* Model block: specifies models like our likelihood function and prior(s) for the unknown parameters.
+
+Here we use the `stan_model()` function to specify our model, then use the `sampling()` function from `rstan` to draw our samples from the poster distribution. We've specified 10 chains, 2k samples per chain (with the first 1k samples being "warmup" samples), so we'll end of with a total of 10k samples from the posterior.
+
+```{r echo=T, results='hide'}
+model_temp <- stan_model(
+    model_code = 
+        "
+        data {
+          int <lower = 1> n;  // number of times we tossed the globe
+          int w;              // number of 'water' tosses
+        }
+        
+        parameters {
+          real <lower = 0, upper = 1> p;  // proportion
+        }
+        
+        model {
+          w ~ binomial(n, p);  // likelihood
+          p ~ uniform(0, 1);   // prior for unknown parameter (p)
+        }
+        "
+)
+
+# Stan expects our data as a list
+dat_stan <- list(
+  w = 6,  # this is the number of water tosses we observed
+  n = 9   # this is the number of times we tossed the globe
+)
+
+# draw posterior samples
+fit <- sampling(
+    model_temp, 
+    data = dat_stan, 
+    iter = 2000, 
+    chains = 10,
+    show_messages = FALSE  # generally best to use TRUE to check on things but suppressing messages here for simplicity
+    )
+```
+
+We can now check out a summary of our posterior draws of unknown parameter $p$:
+
+```{r}
+fit
+```
+
+Or store our posterior samples and summarize them:
+
+```{r}
+posterior_samples_mcmc <- fit %>%
+  spread_draws(p)
+  
+# get the quantile intervals
+posterior_samples_mcmc %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = qi
+    )
+
+# get highest density intervals (HDI)
+posterior_samples_mcmc %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = hdi
+    )
+
+# plot the distribution
+posterior_samples_mcmc %>%
+    ggplot(aes(x = p)) +
+    geom_histogram(fill = "sky blue", color = "white", bins = 50) +
+    labs(
+        title = "10k samples of the posterior distribution",
+        subtitle = "Markov Chain Monte Carlo (MCMC)",
+        x = "Possible parameter values",
+        y = ""
+    ) +
+    theme_minimal()
+```
+
+# Another example
+
+In our above globe tossing example, there was only a single unknown parameter of interest. With other kinds of distributions -- like the Gaussian (normal) distribution -- there is more than one parameter (e.g., the shape of the normal distribution is described by its mean $\mu$ and its standard deviation $\sigma$). However, the application of Bayesian statistics is the same as above. We consider possible **combinations** of values for $\mu$ and $\sigma$ and score each combination by its relative plausibility, in light of the data.
+
+*Note: Notice that now we're dealing with the plausibility of combinations of unknown parameter values which quickly becomes intractable with many unknown parameters. This is the beauty of using MCMC to just take samples from the posterior instead of needing to analytically calculate the posterior*
+
+## A Gaussian model of height
+
+Suppose we want to model adult height using a Gaussian (normal) distribution. First we get our data:
+
+```{r}
+### read in data set
+Howell1 <- read_delim(
+  "data/Howell1.csv", 
+  delim = ";", 
+  escape_double = FALSE, 
+  trim_ws = TRUE
+)
+
+df_adults <- Howell1 %>% 
+    filter(age >= 18) %>%
+    mutate(
+        weight_centered = as.vector(scale(weight))  # we'll use this later
+    )
+    
+skim(df_adults)
+```
+
+Using the same "language" as above, we can specify our model (where $h_i$
+refers to the height $h$ for individual $i$):
+
+$$h_i \sim Normal(\mu, \sigma)$$
+
+We also need some priors - specifically $Pr(\mu, \sigma)$ which is
+the joint probability for our unknown parameters. Typically priors are specified separately for each prior, which amounts to assuming
+$Pr(\mu, \sigma) = Pr(\mu)Pr(\sigma)$ so we can write:
+
+$$h_i \sim Normal(\mu, \sigma)$$ 
+$$\mu \sim Normal(178, 20)$$
+$$\sigma \sim Uniform(0, 50)$$
+*Note: we're again not making any very strong assumptions about our prior distributions here*
+
+Although we could again use grid approximation to generate a posterior (e.g., by calculating the plausibility of a finite but sufficiently granular "grid" of possible combinations of values for $\mu$ and $\sigma$), here we just jump straight into using `rstan` and MCMC to draw samples.
+
+```{r echo=T, results='hide'}
+model_temp <- stan_model(
+    model_code = 
+        "
+        data {
+          int <lower = 1> n;  // sample size
+          vector[n] height;
+        }
+        
+        parameters {
+          real mu;  // mean
+          real <lower = 0, upper = 50> sigma;  // standard deviation 
+        }
+        
+        model {
+          height ~ normal(mu, sigma);  // likelihood
+          mu ~ normal(178, 20);  // mu prior
+          sigma ~ uniform(0, 50);  // sigma prior
+        }
+        "
+)
+
+# Create a list of data
+dat_stan_adult_height <- list(
+  height = df_adults$height,
+  n = length(df_adults$height)
+)
+
+# draw posterior samples
+fit_height <- sampling(
+    model_temp, 
+    data = dat_stan_adult_height, 
+    iter = 2000, 
+    chains = 10,
+    show_messages = FALSE  # generally best to use TRUE to check on things but suppressing messages here for simplicity
+    )
+```
+
+Now we can check out a summary of our posterior: 
+
+```{r}
+fit_height
+```
+
+Or summarize the posterior draws on our own:
+
+```{r}
+# get the posterior samples for mu
+posterior_height_samples_mcmc <- fit_height %>%
+  spread_draws(mu)
+  
+# get the quantile intervals
+posterior_height_samples_mcmc %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = qi
+    )
+
+# get highest density intervals (HDI)
+posterior_height_samples_mcmc %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = hdi
+    )
+
+# plot the distribution
+posterior_height_samples_mcmc %>%
+    ggplot(aes(x = mu)) +
+    geom_histogram(fill = "sky blue", color = "white", bins = 50) +
+    labs(
+        title = "10k samples of the posterior distribution",
+        subtitle = "Markov Chain Monte Carlo (MCMC)",
+        x = "Possible values of mu",
+        y = ""
+    ) +
+    theme_minimal()
+
+```
+
+### An aside on priors
+
+How strong is a prior?
+
+A prior can usually be interpreted as a former posterior inference, as previous data. So it can be useful to think about the strength of a prior in terms of which data would lead to the same posterior distribution. The formula for the standard deviation of a Gaussian posterior for $\mu$ is (same as standard error of the sampling distribution of the mean from non-Bayesian inference):
+
+$$\sigma_{post} = \frac{1}{\sqrt{n}}$$ 
+
+So:
+
+$$n = \frac{1}{\sigma^2_{post}}$$
+
+If we specify a "strong" prior such as $\mu \sim Normal(178, 0.1)$
+(i.e., a very narrow/certain prior), then that is equivalent to having
+previously observed $n = \frac{1}{0.1^2} = 100$ heights with a mean of
+178. In contrast, the $\mu \sim Normal(178, 20)$ prior we used implies
+$n = \frac{1}{20^2} = 0.0025$ of an observation.
+
+## Adding a predictor
+
+Now let's add a predictor to our model to understand the association between height (outcome) and weight (predictor).
+
+As usual, we can describe our model in mathematical notation:
+
+*Note: I needed to switch to a cauchy prior distribution -- instead of uniform -- to get the Stan sampling to converge. Using uniform was too uninformative in this case*
+
+$$h_i \sim Normal(\mu_i, \sigma)$$ 
+$$\mu_i = \alpha + \beta x_i$$
+$$\alpha \sim Normal(178, 100)$$ 
+$$\beta \sim Normal(0, 10)$$
+$$\sigma \sim Cauchy(0, 10)$$
+
+Note that likelihood is nearly identical to before, except there is a
+little index $i$ on the $\mu$, as well as the $h$. This is necessary now
+because the mean $\mu$ now depends upon unique predictor values on each
+row $i$. The little $i$ on $\mu$ indicates that the mean depends upon
+the row.
+
+Note also that $\mu$ is no longer a parameter to be estimated. Rather
+$u_i$ is now constructed from other parameters that we've made up --
+$\alpha$ and $\beta$ -- and the predictor variable $x$. It is not
+stochastic ($\sim$), it is deterministic ($=$).
+
+$\alpha$ tells us the expected height when $x_i = 0$, also known as the
+intercept.
+
+$\beta$ tells us the expected change in height when $x_i$ changes by 1.
+
+The remaining lines for $\alpha$, $\beta$, and $\sigma$ are simply
+the priors for the parameters to be estimated.
+
+```{r echo=T, results='hide'}
+model_temp <- stan_model(
+    model_code = 
+        "
+        data {
+          int<lower = 0> n;  // sample size
+          vector[n] height;
+          vector[n] weight;
+        }
+        
+        parameters {
+          real alpha;  
+          real beta;
+          real<lower=0> sigma;  // standard deviation 
+        }
+        
+        model {
+          height ~ normal(alpha + beta * weight, sigma);  // likelihood
+          alpha ~ normal(178, 100);  // alpha prior
+          beta ~ normal(0, 10);  // beta prior
+          sigma ~ cauchy(0, 10);  // cauchy prior
+        }
+        "
+)
+# Create a list of data
+dat_stan_adult_height <- list(
+  height = df_adults$height,
+  weight = df_adults$weight_centered,
+  n = length(df_adults$height)
+)
+
+# draw posterior samples
+fit_height_w_predictor <- sampling(
+    model_temp, 
+    data = dat_stan_adult_height, 
+    iter = 20000, 
+    chains = 5,
+    show_messages = FALSE  # generally best to use TRUE to check on things but suppressing messages here for simplicity
+    )
+```
+
+```{r}
+# get the posterior samples for beta
+posterior_height_w_predictor_samples_mcmc <- fit_height_w_predictor %>%
+  spread_draws(beta)
+  
+# get the quantile intervals
+posterior_height_w_predictor_samples_mcmc %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = qi
+    )
+
+# get highest density intervals (HDI)
+posterior_height_w_predictor_samples_mcmc %>%
+    point_interval(
+        .width = c(.89, .95), 
+        .point = mean, 
+        .interval = hdi
+    )
+
+# plot the distribution
+posterior_height_w_predictor_samples_mcmc %>%
+    ggplot(aes(x = beta)) +
+    geom_histogram(fill = "sky blue", color = "white", bins = 50) +
+    labs(
+        title = "10k samples of the posterior distribution",
+        subtitle = "Markov Chain Monte Carlo (MCMC)",
+        x = "Possible values of beta",
+        y = ""
+    ) +
+    theme_minimal()
+
+```
+
+And now we can make very straightforward statements about the relationship between height and weight: When weight increases by 1SD, there is a 95% chance that the corresponding change in height is between 5.31 and 6.37.
+
+# Concluding Remarks
+
+This notebook has only scratched the surface, and is intended as a basic introduction to understanding what Bayesian modeling is doing under the hood (and why it's useful!). While we started using MCMC sampling and working directly with Stan models here, there are also awesome packages like [brms](https://cran.r-project.org/web/packages/brms/index.html) and [rstanarm](https://cran.r-project.org/web/packages/rstanarm/index.html) which make Bayesian modeling easier. Not to mention all the great documentation provided by [rstan](https://mc-stan.org/users/interfaces/rstan) itself.
+
+We also haven't deeply covered other important topics in Bayesian statistics like the nuances of priors and helpful diagnostics like posterior predictive checks. Until then...
+
+Onward!
+
