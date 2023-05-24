@@ -29,7 +29,7 @@ In grad school I was trained in frequentist statistics - which is great. Frequen
 
 \**Side note: I absolutely am a hater of the dichotomous decision making imposed by null hypothesis significance testing (NHST) and "statistical significance" (see [this great paper](https://www.nature.com/articles/d41586-019-00857-9)).*
 
-For many years, however -- given my lack of any formal training in Bayesian methods -- whenever I encountered Bayesian statistics I had a hard time getting it.
+But, Bayesian statistics are also useful and I found myself wanting to learn more.
 
 When I started learning Bayesian statistics on my own, the best book I came across (by far) was Richard McElreath's [Statistical Rethinking](https://github.com/rmcelreath/rethinking). Using very simple examples and applications in R code, he walks through the basics in a way that just made things click for me. 
 
